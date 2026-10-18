@@ -404,6 +404,18 @@ def route(att_id: int, db: Session = Depends(get_db), u: User = Depends(get_curr
     if not att or (att.user_id != u.id and u.role != "admin"):
         raise HTTPException(404, "Not found")
     pts = db.query(LocationLog).filter(LocationLog.attendance_id == att_id).order_by(LocationLog.recorded_at).all()
+    # Read-time route distance (B1): filter GPS spikes so an open (not yet
+    # punched-out) day already shows a live distance. Once punched out the
+    # persisted total_distance_m wins.
+    prev = (att.in_lat, att.in_lng) if att.in_lat is not None else None
+    live_dist = 0.0
+    for p in pts:
+        if prev is not None:
+            live_dist += sane_segment(prev[0], prev[1], p.lat, p.lng)
+        prev = (p.lat, p.lng)
+    if att.out_lat is not None and prev is not None:
+        live_dist += sane_segment(prev[0], prev[1], att.out_lat, att.out_lng)
+    distance_m = att.total_distance_m if (att.total_distance_m or 0) > 0 else round(live_dist, 1)
     emp = db.get(User, att.user_id)
     return {"attendance_id": att_id,
             "user": {"id": att.user_id, "name": emp.name if emp else "",
@@ -415,7 +427,7 @@ def route(att_id: int, db: Session = Depends(get_db), u: User = Depends(get_curr
                         "accuracy": p.accuracy, "speed": p.speed, "is_mock": p.is_mock} for p in pts],
             "in": {"lat": att.in_lat, "lng": att.in_lng, "accuracy": att.in_accuracy},
             "out": {"lat": att.out_lat, "lng": att.out_lng, "accuracy": att.out_accuracy},
-            "distance_m": att.total_distance_m,
+            "distance_m": distance_m,
             "break_minutes": att.break_minutes or 0,
             "overtime_minutes": att.overtime_minutes or 0,
             "overtime_start": att.overtime_started_at,
