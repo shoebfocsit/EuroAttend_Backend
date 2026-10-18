@@ -24,8 +24,16 @@ def today_ist_date() -> date:
 
 
 def parse_hhmm(s: str) -> dtime:
-    h, m = s.split(":")
-    return dtime(hour=int(h), minute=int(m))
+    try:
+        parts = s.strip().split(":")
+        if len(parts) != 2:
+            raise ValueError("expected HH:MM")
+        h, m = int(parts[0]), int(parts[1])
+        if not (0 <= h <= 23 and 0 <= m <= 59):
+            raise ValueError("hour/minute out of range")
+        return dtime(hour=h, minute=m)
+    except Exception as e:
+        raise ValueError(f"Invalid time '{s}', expected HH:MM (00:00-23:59)") from e
 
 
 def as_aware(dt: datetime) -> datetime:

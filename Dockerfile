@@ -2,5 +2,8 @@ FROM python:3.12-slim
 WORKDIR /code
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY . .
-CMD ["sh", "-c", "alembic upgrade head || true; python -m scripts.seed || true; uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+COPY app ./app
+COPY alembic ./alembic
+COPY alembic.ini .
+COPY scripts ./scripts
+CMD ["sh", "-c", "alembic upgrade head && python -m scripts.seed && uvicorn app.main:app --host 0.0.0.0 --port 8000"]

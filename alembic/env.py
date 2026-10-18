@@ -1,7 +1,7 @@
 from logging.config import fileConfig
 from alembic import context
 from app.db.base import Base
-import app.models.user, app.models.attendance, app.models.tracking
+import app.models.user, app.models.attendance, app.models.tracking, app.models.user_policy  # noqa
 from app.core.config import settings
 
 config = context.config

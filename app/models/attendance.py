@@ -1,11 +1,12 @@
 from datetime import datetime, date
-from sqlalchemy import String, Integer, Float, Boolean, Date, DateTime, ForeignKey
+from sqlalchemy import String, Integer, Float, Boolean, Date, DateTime, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from app.db.base import Base
 
 
 class Attendance(Base):
     __tablename__ = "attendance"
+    __table_args__ = (UniqueConstraint("user_id", "date", name="uq_attendance_user_date"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     date: Mapped[date] = mapped_column(Date, index=True)

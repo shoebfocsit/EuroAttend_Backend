@@ -1,6 +1,6 @@
 """Breaks + min-shift-hours policy. Run: alembic upgrade head"""
 revision = "0002_breaks"
-down_revision = None
+down_revision = "0001_initial"
 
 from alembic import op
 import sqlalchemy as sa

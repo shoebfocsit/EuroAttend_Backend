@@ -1,6 +1,7 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from jose import jwt, JWTError
 from passlib.context import CryptContext
+import uuid
 
 from app.core.config import settings
 
@@ -17,8 +18,10 @@ def verify_password(pw: str, hashed: str) -> bool:
 
 
 def _encode(sub: str, minutes: int = 0, days: int = 0, kind: str = "access") -> str:
-    exp = datetime.utcnow() + (timedelta(minutes=minutes) if kind == "access" else timedelta(days=days))
-    return jwt.encode({"sub": sub, "type": kind, "exp": exp}, settings.SECRET_KEY, algorithm=ALGO)
+    now = datetime.now(timezone.utc)
+    exp = now + (timedelta(minutes=minutes) if kind == "access" else timedelta(days=days))
+    return jwt.encode({"sub": sub, "type": kind, "exp": exp,
+                       "iat": now, "jti": uuid.uuid4().hex}, settings.SECRET_KEY, algorithm=ALGO)
 
 
 def create_access(user_id: int) -> str:

@@ -18,13 +18,25 @@ def _run():
         s = db.get(Setting, 1)
         now = now_ist()
         open_rows = db.query(Attendance).filter(Attendance.punch_out_time.is_(None)).all()
-        bmax = 45
         for a in open_rows:
             # per-user shift end (custom policy if admin set one)
             up = db.get(UserPolicy, a.user_id)
             se_str = (up.shift_end if up and up.shift_end
-                      else (s.shift_end if s else app_settings.SHIFT_END))
-            if now.time() < parse_hhmm(se_str):
+                      else (s.shift_end if s and s.shift_end else app_settings.SHIFT_END))
+            bmax = (up.max_break_minutes
+                    if up and up.max_break_minutes is not None
+                    else (s.max_break_minutes if s and s.max_break_minutes is not None
+                          else app_settings.MAX_BREAK_MINUTES))
+            try:
+                se_today = parse_hhmm(se_str)
+            except ValueError:
+                continue
+            # close at THIS row's shift-end, not wall-clock — stale multi-day rows
+            # must not inflate to now (24h+ totals)
+            from app.core.time import ist_tz as _tz
+            from datetime import datetime as _dt
+            se_dt = _tz().localize(_dt.combine(a.date, se_today))
+            if now < se_dt:
                 continue
             ot_limit = (up.overtime_limit_hours
                         if up and up.overtime_limit_hours is not None
@@ -48,20 +60,20 @@ def _run():
                     b.duration_minutes = mins
                 bmins += b.duration_minutes or 0
             # only auto-close same-day stale sessions
-            a.punch_out_time = now
+            # stale rows (>1 day old) close at their own shift-end, not now
+            close_at = now if a.date == now.date() else se_dt
+            a.punch_out_time = close_at
             a.auto_punched_out = True
             a.break_minutes = bmins
             a.total_minutes = net_minutes(
-                (now - as_aware(a.punch_in_time)).total_seconds(), bmins)
-            from app.core.time import ist_tz as _tz
-            from datetime import datetime as _dt
-            se_dt = _tz().localize(_dt.combine(a.date, parse_hhmm(se_str)))
-            a.overtime_minutes = overtime_minutes(now, se_dt)
+                (close_at - as_aware(a.punch_in_time)).total_seconds(), bmins)
+            a.overtime_minutes = overtime_minutes(close_at, se_dt)
             hhmm = as_aware(a.punch_in_time).strftime("%H:%M")
             ss = (up.shift_start if up and up.shift_start
-                  else (s.shift_start if s else app_settings.SHIFT_START))
-            a.status = calc_status(hhmm, ss, s.late_after if s else 15,
-                                   a.total_minutes, s.half_day_hours if s else 4.0)
+                  else (s.shift_start if s and s.shift_start else app_settings.SHIFT_START))
+            late_after = s.late_after if s and s.late_after is not None else 15
+            half_day = s.half_day_hours if s and s.half_day_hours is not None else 4.0
+            a.status = calc_status(hhmm, ss, late_after, a.total_minutes, half_day)
         db.commit()
     finally:
         db.close()
@@ -72,5 +84,5 @@ def start():
     if _sched:
         return
     _sched = BackgroundScheduler(timezone="Asia/Kolkata")
-    _sched.add_job(_run, "cron", minute="*/15")
+    _sched.add_job(_run, "cron", minute="*/15", max_instances=1, coalesce=True)
     _sched.start()

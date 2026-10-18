@@ -1,5 +1,6 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from pydantic import BaseModel, Field
+from typing import Literal
 
 
 class LoginIn(BaseModel):
@@ -43,22 +44,22 @@ class TodayOut(BaseModel):
 
 
 class TrackPoint(BaseModel):
-    lat: float
-    lng: float
-    accuracy: float | None = None
-    speed: float | None = None
+    lat: float = Field(ge=-90, le=90)
+    lng: float = Field(ge=-180, le=180)
+    accuracy: float | None = Field(default=None, ge=0, le=5000)
+    speed: float | None = Field(default=None, ge=0, le=100)
     recorded_at: datetime
     is_mock: bool = False
 
 
 class BatchIn(BaseModel):
     attendance_id: int
-    points: list[TrackPoint]
+    points: list[TrackPoint] = Field(max_length=500)
 
 
 class EventIn(BaseModel):
     attendance_id: int | None = None
-    type: str  # gps_off|gps_on|app_killed|sync|mock_detected
+    type: Literal["gps_off", "gps_on", "app_killed", "sync", "mock_detected"]
 
 
 class BreakOut(BaseModel):

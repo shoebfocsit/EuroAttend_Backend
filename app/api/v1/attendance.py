@@ -1,6 +1,6 @@
 """Punch in/out, today, history, route, summary."""
 import csv, io
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date as _date
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
@@ -158,9 +158,10 @@ async def punch_in(lat: float = Form(...), lng: float = Form(...),
     if outside and settings.STRICT_GEOFENCE:
         raise HTTPException(400, "Outside office geofence")
     data = await selfie.read()
-    if len(data) > 5 * 1024 * 1024:
-        raise HTTPException(400, "Selfie too large (max 5MB)")
-    url = get_storage().save(data, selfie.filename or "in.jpg")
+    try:
+        url = get_storage().save(data, selfie.filename or "in.jpg")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     now = now_ist()
     dev_at = None
     try:
@@ -198,9 +199,9 @@ def break_start(lat: float = Form(...), lng: float = Form(...),
     db.add(b)
     db.commit()
     db.refresh(b)
-    s = _settings(db)
+    P = _pol(db, u.id)
     return BreakOut(id=b.id, start_time=b.start_time, on_break=True,
-                    max_minutes=s.max_break_minutes or settings.MAX_BREAK_MINUTES)
+                    max_minutes=P["max_break_minutes"] or settings.MAX_BREAK_MINUTES)
 
 
 @router.post("/break-end", response_model=BreakOut)
@@ -259,6 +260,7 @@ def overtime_start(db: Session = Depends(get_db), u: User = Depends(get_current_
 async def punch_out(lat: float = Form(...), lng: float = Form(...),
                     accuracy: float | None = Form(None),
                     device_ts: str | None = Form(None),
+                    force: bool = Form(False),
                     selfie: UploadFile = File(...),
                     db: Session = Depends(get_db), u: User = Depends(get_current_user)):
     att = _open_today(db, u.id)
@@ -271,11 +273,14 @@ async def punch_out(lat: float = Form(...), lng: float = Form(...),
         raise HTTPException(400, "Break is running — end your break before punch-out")
     gross_sec = (now - as_aware(att.punch_in_time)).total_seconds()
     bmins = _break_total(db, att.id)
-    # punch-out allowed ANYTIME — day-wise net hours are calculated,
-    # short days simply show fewer hours (Half-day if below half_day_hours)
+    allowed, remaining = can_punch_out(gross_sec, bmins, P["min_shift_hours"])
+    if not allowed and not force:
+        raise HTTPException(400, f"Min {P['min_shift_hours']}h not done — {remaining} min left (or retry with force=true for early leave)")
     data = await selfie.read()
-    url = get_storage().save(data, selfie.filename or "out.jpg")
-    now = now_ist()
+    try:
+        url = get_storage().save(data, selfie.filename or "out.jpg")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     att.punch_out_time = now
     att.out_lat, att.out_lng, att.out_accuracy, att.out_selfie_url = lat, lng, accuracy, url
     try:
@@ -285,7 +290,12 @@ async def punch_out(lat: float = Form(...), lng: float = Form(...),
     # NET working time: gross shift minus all breaks
     att.break_minutes = _break_total(db, att.id)
     att.total_minutes = net_minutes(gross_sec, att.break_minutes)
-    att.overtime_minutes = overtime_minutes(now, _shift_end_dt(att.date, P["shift_end"]))
+    raw_ot = overtime_minutes(now, _shift_end_dt(att.date, P["shift_end"]))
+    if not P["overtime_allowed"]:
+        raw_ot = 0
+    else:
+        raw_ot = min(raw_ot, int((P["overtime_limit_hours"] or 3.0) * 60))
+    att.overtime_minutes = raw_ot
     hhmm = as_aware(att.punch_in_time).strftime("%H:%M")
     att.status = calc_status(hhmm, P["shift_start"], P["late_after"], att.total_minutes, P["half_day_hours"])
     # distance from tracked points (teleport jumps ignored)
@@ -337,9 +347,13 @@ def today(db: Session = Depends(get_db), u: User = Depends(get_current_user)):
     ob = _open_break(db, att.id) if att.punch_out_time is None else None
     net_so_far, remaining, can_out = None, None, False
     if att.punch_out_time is None:
-        gross = (now_ist() - as_aware(att.punch_in_time)).total_seconds()
-        net_so_far = net_minutes(gross, bmins)
-        can_out, remaining = can_punch_out(gross, bmins, P["min_shift_hours"])
+        now = now_ist()
+        gross = (now - as_aware(att.punch_in_time)).total_seconds()
+        open_break_extra = 0
+        if ob is not None:
+            open_break_extra = max(0, int((now - as_aware(ob.start_time)).total_seconds() // 60))
+        net_so_far = max(0, net_minutes(gross, bmins + open_break_extra))
+        can_out, remaining = can_punch_out(gross, bmins + open_break_extra, P["min_shift_hours"])
     ot = att.overtime_started_at is not None
     d = {"id": att.id, "date": str(att.date),
          "punch_in_time": att.punch_in_time, "punch_out_time": att.punch_out_time,
@@ -361,14 +375,21 @@ def today(db: Session = Depends(get_db), u: User = Depends(get_current_user)):
                     attendance=d, server_time=now_ist())
 
 
+def _month_bounds(month: str) -> tuple[_date, _date]:
+    y, m = map(int, month.split("-"))
+    start = _date(y, m, 1)
+    end = _date(y + (m == 12), m % 12 + 1, 1)
+    return start, end
+
+
 @router.get("/history")
 def history(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
             db: Session = Depends(get_db), u: User = Depends(get_current_user)):
-    y, m = map(int, month.split("-"))
+    start, end = _month_bounds(month)
     rows = db.query(Attendance).filter(
         Attendance.user_id == u.id,
-        Attendance.date >= f"{y:04d}-{m:02d}-01",
-        Attendance.date < f"{y + (m == 12):04d}-{m % 12 + 1:02d}-01").order_by(Attendance.date.desc()).all()
+        Attendance.date >= start,
+        Attendance.date < end).order_by(Attendance.date.desc()).all()
     return [{"id": r.id, "date": str(r.date), "punch_in": r.punch_in_time, "punch_out": r.punch_out_time,
              "total_minutes": r.total_minutes, "break_minutes": r.break_minutes or 0,
              "overtime_minutes": r.overtime_minutes or 0, "status": r.status,
@@ -404,11 +425,11 @@ def route(att_id: int, db: Session = Depends(get_db), u: User = Depends(get_curr
 @router.get("/summary")
 def summary(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
             db: Session = Depends(get_db), u: User = Depends(get_current_user)):
-    y, m = map(int, month.split("-"))
+    start, end = _month_bounds(month)
     rows = db.query(Attendance).filter(
         Attendance.user_id == u.id,
-        Attendance.date >= f"{y:04d}-{m:02d}-01",
-        Attendance.date < f"{y + (m == 12):04d}-{m % 12 + 1:02d}-01").all()
+        Attendance.date >= start,
+        Attendance.date < end).all()
     present = [r for r in rows if r.status in ("Present", "Late")]
     half = [r for r in rows if r.status == "Half-day"]
     tot_min = sum((r.total_minutes or 0) for r in rows)

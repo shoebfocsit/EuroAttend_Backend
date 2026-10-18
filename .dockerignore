@@ -1,0 +1,9 @@
+.env
+dev.db
+.venv/
+__pycache__/
+*.pyc
+uploads/
+.pytest_cache/
+.git/
+flutter_app/

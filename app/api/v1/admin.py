@@ -1,4 +1,5 @@
 import csv, io
+from datetime import date as _date
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
@@ -62,7 +63,7 @@ def overview(month: str | None = Query(None, pattern=r"^\d{4}-\d{2}$"),
     today = today_ist_date()
     month = month or today.strftime("%Y-%m")
     y, m = map(int, month.split("-"))
-    m_start, m_end = f"{y:04d}-{m:02d}-01", f"{y + (m == 12):04d}-{m % 12 + 1:02d}-01"
+    m_start, m_end = _date(y, m, 1), _date(y + (m == 12), m % 12 + 1, 1)
     out = []
     for u in db.query(User).filter(User.role != "admin", User.is_active == True).order_by(User.id).all():  # noqa
         att = db.query(Attendance).filter(
@@ -157,9 +158,10 @@ def set_user_policy(uid: int, body: UserPolicyIn,
 
 
 @router.get("/users")
-def list_users(db: Session = Depends(get_db), _: User = Depends(require_admin)):
+def list_users(limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
+               db: Session = Depends(get_db), _: User = Depends(require_admin)):
     out = []
-    for u in db.query(User).order_by(User.id).all():
+    for u in db.query(User).order_by(User.id).offset(offset).limit(limit).all():
         up = db.get(UserPolicy, u.id)
         custom = up is not None and any(
             getattr(up, f) is not None for f in (
@@ -187,10 +189,14 @@ def create_user(body: UserCreate, db: Session = Depends(get_db), _: User = Depen
 
 
 @router.patch("/users/{uid}")
-def update_user(uid: int, body: UserUpdate, db: Session = Depends(get_db), _: User = Depends(require_admin)):
+def update_user(uid: int, body: UserUpdate, db: Session = Depends(get_db), cur: User = Depends(require_admin)):
     u = db.get(User, uid)
     if not u:
         raise HTTPException(404, "Not found")
+    if uid == cur.id and body.role is not None and body.role != "admin":
+        raise HTTPException(400, "You cannot demote yourself")
+    if uid == cur.id and body.is_active is False:
+        raise HTTPException(400, "You cannot deactivate yourself")
     if body.name is not None:
         u.name = body.name
     if body.role is not None:
@@ -215,8 +221,8 @@ def user_attendance(uid: int, month: str | None = Query(None, pattern=r"^\d{4}-\
     if month:
         y, m = map(int, month.split("-"))
         q = q.filter(
-            Attendance.date >= f"{y:04d}-{m:02d}-01",
-            Attendance.date < f"{y + (m == 12):04d}-{m % 12 + 1:02d}-01")
+            Attendance.date >= _date(y, m, 1),
+            Attendance.date < _date(y + (m == 12), m % 12 + 1, 1))
     rows = q.order_by(Attendance.date.desc()).limit(1000).all()
     days = [{"id": r.id, "date": str(r.date), "in": r.punch_in_time, "out": r.punch_out_time,
              "minutes": r.total_minutes, "break_minutes": r.break_minutes or 0,
@@ -239,13 +245,15 @@ def user_attendance(uid: int, month: str | None = Query(None, pattern=r"^\d{4}-\
 @router.get("/attendance")
 def all_attendance(date: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
                    user_id: int | None = None,
+                   limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
                    db: Session = Depends(get_db), _: User = Depends(require_admin)):
     q = db.query(Attendance)
     if date:
-        q = q.filter(Attendance.date == date)
+        y, mo, d = map(int, date.split("-"))
+        q = q.filter(Attendance.date == _date(y, mo, d))
     if user_id:
         q = q.filter(Attendance.user_id == user_id)
-    rows = q.order_by(Attendance.date.desc()).limit(500).all()
+    rows = q.order_by(Attendance.date.desc()).offset(offset).limit(limit).all()
     return [{"id": r.id, "user_id": r.user_id, "date": str(r.date), "in": r.punch_in_time,
              "out": r.punch_out_time, "minutes": r.total_minutes, "status": r.status,
              "in_selfie": r.in_selfie_url, "out_selfie": r.out_selfie_url} for r in rows]
@@ -256,14 +264,17 @@ def report(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
            db: Session = Depends(get_db), _: User = Depends(require_admin)):
     y, m = map(int, month.split("-"))
     rows = db.query(Attendance, User).join(User, Attendance.user_id == User.id).filter(
-        Attendance.date >= f"{y:04d}-{m:02d}-01",
-        Attendance.date < f"{y + (m == 12):04d}-{m % 12 + 1:02d}-01").all()
+        Attendance.date >= _date(y, m, 1),
+        Attendance.date < _date(y + (m == 12), m % 12 + 1, 1)).all()
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["user_id", "name", "mobile", "date", "in", "out", "minutes", "hours", "status", "distance_m"])
+    w.writerow(["user_id", "name", "mobile", "date", "in", "out", "minutes", "hours", "status",
+                "break_minutes", "overtime_minutes", "distance_m", "auto_punched_out"])
     for a, usr in rows:
         w.writerow([usr.id, usr.name, usr.mobile, a.date, a.punch_in_time, a.punch_out_time,
-                    a.total_minutes, round((a.total_minutes or 0) / 60, 2), a.status, round(a.total_distance_m or 0, 1)])
+                    a.total_minutes, round((a.total_minutes or 0) / 60, 2), a.status,
+                    a.break_minutes or 0, a.overtime_minutes or 0,
+                    round(a.total_distance_m or 0, 1), a.auto_punched_out])
     buf.seek(0)
     return StreamingResponse(iter([buf.getvalue()]), media_type="text/csv",
                              headers={"Content-Disposition": f"attachment; filename=report-{month}.csv"})

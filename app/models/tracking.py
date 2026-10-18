@@ -29,8 +29,8 @@ class Event(Base):
 class Setting(Base):
     __tablename__ = "settings"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
-    shift_start: Mapped[str] = mapped_column(default="09:30")
-    shift_end: Mapped[str] = mapped_column(default="18:30")
+    shift_start: Mapped[str] = mapped_column(default="10:00")
+    shift_end: Mapped[str] = mapped_column(default="19:00")
     late_after: Mapped[int] = mapped_column(Integer, default=15)
     half_day_hours: Mapped[float] = mapped_column(Float, default=4.0)
     geofence_lat: Mapped[float] = mapped_column(Float, default=28.6139)

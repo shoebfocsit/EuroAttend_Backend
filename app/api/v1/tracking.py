@@ -1,6 +1,6 @@
 """Batch upload (offline-tolerant) + realtime WS + GPS events."""
-from datetime import datetime
-from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect, Query
+from datetime import datetime, timezone
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query
 from sqlalchemy.orm import Session
 
 from app.core.deps import get_db, get_current_user
@@ -18,7 +18,13 @@ from app.core.config import settings as app_settings
 router = APIRouter(prefix="/tracking", tags=["tracking"])
 
 
-def _max_acc(db: Session) -> float:
+def _max_acc(db: Session, user_id: int | None = None) -> float:
+    # per-user override wins, else global, else config default
+    if user_id is not None:
+        from app.models.user_policy import UserPolicy
+        up = db.get(UserPolicy, user_id)
+        if up is not None and getattr(up, "max_accuracy_m", None) is not None:
+            return float(up.max_accuracy_m)
     s = db.get(Setting, 1)
     if s and getattr(s, "max_accuracy_m", None):
         return float(s.max_accuracy_m)
@@ -29,29 +35,40 @@ def _max_acc(db: Session) -> float:
 async def batch(body: BatchIn, db: Session = Depends(get_db), u: User = Depends(get_current_user)):
     att = db.get(Attendance, body.attendance_id)
     if not att or att.user_id != u.id or att.punch_out_time:
-        return {"saved": 0, "error": "invalid/closed session"}
-    max_acc = _max_acc(db)
+        raise HTTPException(404, "invalid/closed session")
+    max_acc = _max_acc(db, u.id)
+    # future-dated points (>10 min ahead) are device-clock junk
+    now = now_ist()
     n, skipped = 0, 0
+    existing = {r[0] for r in db.query(LocationLog.recorded_at).filter(
+        LocationLog.attendance_id == att.id).all()}
+    pending = []
     for p in body.points:
+        rec = p.recorded_at
+        if rec.tzinfo is None:
+            rec = rec.replace(tzinfo=timezone.utc)
+        if (rec - now).total_seconds() > 600:
+            skipped += 1
+            continue
         # junk filter: 96km-accuracy IP fixes must never pollute the route
         if not gps_ok(p.accuracy, max_acc)[0]:
             skipped += 1
             continue
-        exists = db.query(LocationLog).filter(
-            LocationLog.attendance_id == att.id,
-            LocationLog.recorded_at == p.recorded_at).first()
-        if exists:
+        if rec in existing:
             continue
-        db.add(LocationLog(attendance_id=att.id, user_id=u.id, lat=p.lat, lng=p.lng,
-                           accuracy=p.accuracy, speed=p.speed,
-                           recorded_at=p.recorded_at, is_mock=p.is_mock))
+        existing.add(rec)
+        pending.append(LocationLog(attendance_id=att.id, user_id=u.id, lat=p.lat, lng=p.lng,
+                                   accuracy=p.accuracy, speed=p.speed,
+                                   recorded_at=rec, is_mock=p.is_mock))
         n += 1
-        # realtime push to subscribed admins (non-blocking best effort)
-        await hub.broadcast({"type": "location", "user_id": u.id, "user_name": u.name,
-                             "attendance_id": att.id, "lat": p.lat, "lng": p.lng,
-                             "accuracy": p.accuracy, "speed": p.speed,
-                             "at": p.recorded_at.isoformat(), "is_mock": p.is_mock})
-    db.commit()
+    if pending:
+        db.add_all(pending)
+        db.commit()
+        for log in pending:  # one broadcast per saved point (admin map stays live)
+            await hub.broadcast({"type": "location", "user_id": u.id, "user_name": u.name,
+                                 "attendance_id": att.id, "lat": log.lat, "lng": log.lng,
+                                 "accuracy": log.accuracy, "speed": log.speed,
+                                 "at": log.recorded_at.isoformat(), "is_mock": log.is_mock})
     return {"saved": n, "skipped": skipped}
 
 
@@ -74,17 +91,31 @@ async def live(ws: WebSocket, token: str = Query(...)):
     db = SessionLocal()
     try:
         u = db.get(User, uid)
+        if not u or not u.is_active:
+            await ws.close(code=4401)
+            return
         while True:
             msg = await ws.receive_json()  # {attendance_id,lat,lng,accuracy,speed,recorded_at,is_mock}
-            att = db.get(Attendance, msg.get("attendance_id"))
+            try:
+                att = db.get(Attendance, int(msg.get("attendance_id") or 0))
+            except Exception:
+                await ws.send_json({"error": "invalid/closed session"})
+                continue
             if not att or att.user_id != uid or att.punch_out_time:
                 await ws.send_json({"error": "invalid/closed session"})
+                continue
+            try:
+                lat = float(msg["lat"]); lng = float(msg["lng"])
+                if not (-90 <= lat <= 90 and -180 <= lng <= 180):
+                    raise ValueError("lat/lng out of range")
+            except Exception:
+                await ws.send_json({"error": "invalid lat/lng"})
                 continue
             try:
                 rec = datetime.fromisoformat(msg["recorded_at"])
             except Exception:
                 rec = now_ist()
-            if not gps_ok(msg.get("accuracy"), _max_acc(db))[0]:
+            if not gps_ok(msg.get("accuracy"), _max_acc(db, uid))[0]:
                 await ws.send_json({"ok": True, "skipped": "weak-gps"})
                 continue
             db.add(LocationLog(attendance_id=att.id, user_id=uid, lat=msg["lat"], lng=msg["lng"],
@@ -103,8 +134,17 @@ async def live(ws: WebSocket, token: str = Query(...)):
 
 
 @router.websocket("/admin-live")
-async def admin_live(ws: WebSocket):
-    """Admin dashboard subscribes for all-employee realtime positions. No auth query for brevity — pass token header check in prod via cookie; here accept then send snapshot."""
+async def admin_live(ws: WebSocket, token: str = Query(...)):
+    """Admin dashboard subscribes for all-employee realtime positions. Requires admin JWT."""
+    uid = decode(token, "access")
+    db = SessionLocal()
+    try:
+        u = db.get(User, uid) if uid else None
+        if not u or not u.is_active or u.role != "admin":
+            await ws.close(code=4401)
+            return
+    finally:
+        db.close()
     await hub.join_admin(ws)
     try:
         await ws.send_json({"type": "snapshot", "positions": hub.last_pos})

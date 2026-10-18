@@ -4,12 +4,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
+    ENV: str = "dev"  # dev | prod
     APP_NAME: str = "EmployeeAttendance"
     APP_TZ: str = "Asia/Kolkata"
     SECRET_KEY: str = "change-me"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
     DATABASE_URL: str = "sqlite:///./dev.db"
+    TRUSTED_HOSTS: str = "*"  # comma-separated in prod, e.g. api.example.com
+    SENTRY_DSN: str = ""
 
     ADMIN_NAME: str = "Administrator"
     ADMIN_MOBILE: str = "9999999999"
@@ -44,6 +47,14 @@ class Settings(BaseSettings):
     @property
     def cors_list(self) -> list[str]:
         return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
+
+    @property
+    def trusted_hosts(self) -> list[str]:
+        return [h.strip() for h in self.TRUSTED_HOSTS.split(",") if h.strip()]
+
+    @property
+    def is_prod(self) -> bool:
+        return self.ENV.lower() == "prod"
 
 
 settings = Settings()
