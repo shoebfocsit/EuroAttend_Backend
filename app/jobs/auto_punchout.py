@@ -11,6 +11,10 @@ from app.core.config import settings as app_settings
 
 _sched = None
 
+# shift_end ke baad itna time do: employee overtime start kare ya khud punch-out
+# kare. Isse 19:00:00 pe turant auto-close nahi hota.
+GRACE_MINUTES = 30
+
 
 def _run():
     db = SessionLocal()
@@ -36,7 +40,8 @@ def _run():
             from app.core.time import ist_tz as _tz
             from datetime import datetime as _dt
             se_dt = _tz().localize(_dt.combine(a.date, se_today))
-            if now < se_dt:
+            # grace window: shift-end ke turant baad close mat karo
+            if now < se_dt + timedelta(minutes=GRACE_MINUTES):
                 continue
             ot_limit = (up.overtime_limit_hours
                         if up and up.overtime_limit_hours is not None
@@ -46,22 +51,23 @@ def _run():
                           else (s.overtime_allowed if s and s.overtime_allowed is not None
                                 else app_settings.OVERTIME_ALLOWED))
             # overtime chal rahi hai aur limit baki hai -> haath mat lagao
+            close_at = se_dt
             if a.overtime_started_at and ot_allowed:
                 ot_done = (now - as_aware(a.overtime_started_at)).total_seconds() / 3600
                 if ot_done <= (ot_limit or 3.0):
                     continue
+                # OT limit cross -> OT limit tak count karo
+                close_at = se_dt + timedelta(hours=(ot_limit or 3.0))
             # close any running break at punch-out time (capped at max)
             bmins = 0
             for b in db.query(Break).filter(Break.attendance_id == a.id).all():
                 if b.end_time is None:
                     mins, capped = settle_break(
-                        (now - as_aware(b.start_time)).total_seconds(), bmax)
-                    b.end_time = as_aware(b.start_time) + timedelta(minutes=bmax) if capped else now
+                        max(0.0, (close_at - as_aware(b.start_time)).total_seconds()), bmax)
+                    b.end_time = as_aware(b.start_time) + timedelta(minutes=bmax) if capped else close_at
                     b.duration_minutes = mins
                 bmins += b.duration_minutes or 0
-            # only auto-close same-day stale sessions
-            # stale rows (>1 day old) close at their own shift-end, not now
-            close_at = now if a.date == now.date() else se_dt
+            # shift-end pe close karo (now pe nahi) taaki grace totals na badhaye
             a.punch_out_time = close_at
             a.auto_punched_out = True
             a.break_minutes = bmins

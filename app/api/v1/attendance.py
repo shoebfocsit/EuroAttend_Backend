@@ -249,7 +249,9 @@ def overtime_start(db: Session = Depends(get_db), u: User = Depends(get_current_
         return {"overtime": True, "since": att.overtime_started_at,
                 "limit_hours": P["overtime_limit_hours"]}
     now = now_ist()
-    if now < _shift_end_dt(att.date, P["shift_end"]):
+    # 5-min tolerance: client clock server se thoda aage ho sakta hai. Warna
+    # dialog open hote hi "Shift time is not over yet" error aati hai.
+    if now < _shift_end_dt(att.date, P["shift_end"]) - timedelta(minutes=5):
         raise HTTPException(400, "Shift time is not over yet")
     att.overtime_started_at = now
     db.commit()
