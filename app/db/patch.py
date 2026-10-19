@@ -19,6 +19,7 @@ _PATCHES = [
     "ALTER TABLE attendance ADD COLUMN is_mock_in BOOLEAN DEFAULT 0",
     "ALTER TABLE attendance ADD COLUMN outside_geofence BOOLEAN DEFAULT 0",
     "ALTER TABLE attendance ADD COLUMN auto_punched_out BOOLEAN DEFAULT 0",
+    "ALTER TABLE attendance ADD COLUMN reopened_at TIMESTAMP",
     "ALTER TABLE attendance ADD COLUMN device_info VARCHAR(500)",
     "ALTER TABLE attendance ADD COLUMN device_in_at TIMESTAMP",
     "ALTER TABLE attendance ADD COLUMN device_out_at TIMESTAMP",

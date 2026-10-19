@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.core.deps import get_db, require_admin
 from app.core.security import hash_password
-from app.core.time import today_ist_date
+from app.core.time import today_ist_date, now_ist
 from app.models.user import User
 from app.models.attendance import Attendance, Break
 from app.models.user_policy import UserPolicy
@@ -257,6 +257,23 @@ def all_attendance(date: str | None = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"
     return [{"id": r.id, "user_id": r.user_id, "date": str(r.date), "in": r.punch_in_time,
              "out": r.punch_out_time, "minutes": r.total_minutes, "status": r.status,
              "in_selfie": r.in_selfie_url, "out_selfie": r.out_selfie_url} for r in rows]
+
+
+@router.post("/attendance/{att_id}/reopen")
+def reopen_attendance(att_id: int, db: Session = Depends(get_db),
+                      _: User = Depends(require_admin)):
+    """Reopen an auto-closed/mistaken punch-out so the employee can punch out
+    again from the app (selfie + location). Auto punch-out is held for a while."""
+    a = db.get(Attendance, att_id)
+    if not a:
+        raise HTTPException(404, "Attendance not found")
+    if a.punch_out_time is None:
+        return {"ok": True, "attendance_id": att_id, "already_open": True}
+    a.punch_out_time = None
+    a.auto_punched_out = False
+    a.reopened_at = now_ist()
+    db.commit()
+    return {"ok": True, "attendance_id": att_id, "reopened": True}
 
 
 @router.get("/report.csv")

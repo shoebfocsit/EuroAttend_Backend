@@ -15,6 +15,9 @@ _sched = None
 # kare. Isse 19:00:00 pe turant auto-close nahi hota.
 GRACE_MINUTES = 30
 
+# admin reopen ke baad itna time auto-close se immune rahega
+REOPEN_HOLD_HOURS = 6
+
 
 def _run():
     db = SessionLocal()
@@ -40,6 +43,10 @@ def _run():
             from app.core.time import ist_tz as _tz
             from datetime import datetime as _dt
             se_dt = _tz().localize(_dt.combine(a.date, se_today))
+            # admin ne manually reopen kiya -> kuch der auto-close mat karo
+            if a.reopened_at is not None:
+                if now < as_aware(a.reopened_at) + timedelta(hours=REOPEN_HOLD_HOURS):
+                    continue
             # grace window: shift-end ke turant baad close mat karo
             if now < se_dt + timedelta(minutes=GRACE_MINUTES):
                 continue

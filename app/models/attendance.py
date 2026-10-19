@@ -31,6 +31,7 @@ class Attendance(Base):
     is_mock_in: Mapped[bool] = mapped_column(Boolean, default=False)
     outside_geofence: Mapped[bool] = mapped_column(Boolean, default=False)
     auto_punched_out: Mapped[bool] = mapped_column(Boolean, default=False)
+    reopened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     device_info: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
 
