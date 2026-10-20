@@ -3,6 +3,7 @@ import csv, io
 from datetime import datetime, timedelta, date as _date
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
 from fastapi.responses import StreamingResponse
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -392,12 +393,18 @@ def history(month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
         Attendance.user_id == u.id,
         Attendance.date >= start,
         Attendance.date < end).order_by(Attendance.date.desc()).all()
+    ids = [r.id for r in rows]
+    counts = (dict(db.query(LocationLog.attendance_id, func.count(LocationLog.id))
+                   .filter(LocationLog.attendance_id.in_(ids))
+                   .group_by(LocationLog.attendance_id).all())
+              if ids else {})
     return [{"id": r.id, "date": str(r.date), "punch_in": r.punch_in_time, "punch_out": r.punch_out_time,
              "total_minutes": r.total_minutes, "break_minutes": r.break_minutes or 0,
              "overtime_minutes": r.overtime_minutes or 0, "status": r.status,
              "in_selfie": r.in_selfie_url, "out_selfie": r.out_selfie_url,
              "in_lat": r.in_lat, "in_lng": r.in_lng, "out_lat": r.out_lat, "out_lng": r.out_lng,
-             "distance_m": r.total_distance_m} for r in rows]
+             "distance_m": r.total_distance_m, "points": int(counts.get(r.id, 0))}
+            for r in rows]
 
 
 @router.get("/{att_id}/route")
